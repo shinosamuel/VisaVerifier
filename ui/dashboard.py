@@ -1,10 +1,25 @@
 import tkinter as tk
+import threading
+import sys
+import os
+import webbrowser
+from datetime import datetime
+from threading import Event
 from tkinter import ttk, filedialog
 from pathlib import Path
 from textwrap import fill
 
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from core.financial_report import FinancialReport, build_financial_reports
+from core.pdf_report import generate_pdf_report
 from core.rules import run_cross_validation_rules
-from core.scanner import scan_folder
+from core.scanner import ScanCancelledError, scan_folder
+
+APP_VERSION = "1.0.0"
+LICENSE_URL = "https://github.com/shinosamuel/VisaVerifier#GPL-3.0-1-ov-file"
 
 class VisaAppGUI:
     def __init__(self, root):
@@ -13,13 +28,20 @@ class VisaAppGUI:
         self.root.geometry("1180x720")
         self.root.minsize(900, 600)
         self.root.state("zoomed")
+        self.set_window_icon()
         self.folder_path = None
+        self.scan_cancel_event = None
+        self.last_scan_comments = ""
+        self.last_scan_findings = []
+        self.last_financial_reports = []
+        self.jurisdiction_var = tk.StringVar(value="Schengen")
         self.setup_styles()
         self.create_menu_bar()
         self.create_tool_bar()
 
         header = ttk.Frame(root, style="Header.TFrame", padding=(24, 18, 24, 16))
         header.pack(fill="x")
+        self.create_welcome_visual(header)
         ttk.Label(header, text="Visa Document Verifier", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
@@ -30,7 +52,6 @@ class VisaAppGUI:
         control_frame = ttk.Frame(root, padding=(24, 14, 24, 10))
         control_frame.pack(fill="x")
         ttk.Button(control_frame, text="Browse folder", command=self.load_folder).pack(side="left")
-        self.jurisdiction_var = tk.StringVar(value="Schengen")
         ttk.Label(control_frame, text="Visa route").pack(side="left", padx=(24, 8))
         ttk.Combobox(
             control_frame,
@@ -39,9 +60,17 @@ class VisaAppGUI:
             state="readonly",
             width=18,
         ).pack(side="left")
-        ttk.Button(control_frame, text="Run scan", command=self.run_audit, style="Accent.TButton").pack(
+        self.run_button = ttk.Button(control_frame, text="Run scan", command=self.run_audit, style="Accent.TButton")
+        self.run_button.pack(
             side="left", padx=(12, 0)
         )
+        self.report_button = ttk.Button(
+            control_frame,
+            text="Generate PDF report",
+            command=self.generate_report,
+            state="disabled",
+        )
+        self.report_button.pack(side="left", padx=(8, 0))
         self.folder_label = ttk.Label(control_frame, text="No folder selected", style="Muted.TLabel")
         self.folder_label.pack(side="left", padx=(18, 0), fill="x", expand=True)
 
@@ -60,13 +89,20 @@ class VisaAppGUI:
         self.status_progress = ttk.Progressbar(status_bar, mode="determinate", maximum=100, length=260)
         self.status_progress.pack(side="right", padx=(12, 0))
 
-        body = ttk.Panedwindow(root, orient="vertical")
+        body = ttk.Notebook(root)
         body.pack(fill="both", expand=True, padx=24, pady=(0, 10))
 
-        documents_frame = ttk.LabelFrame(body, text="Documents found", padding=10)
-        comments_frame = ttk.LabelFrame(body, text="Scan comments", padding=10)
-        body.add(documents_frame, weight=1)
-        body.add(comments_frame, weight=1)
+        verification_tab = ttk.Frame(body)
+        financial_report_tab = ttk.Frame(body)
+        body.add(verification_tab, text="Verification")
+        body.add(financial_report_tab, text="Financial report")
+
+        verification_body = ttk.Panedwindow(verification_tab, orient="vertical")
+        verification_body.pack(fill="both", expand=True)
+        documents_frame = ttk.LabelFrame(verification_body, text="Documents found", padding=10)
+        comments_frame = ttk.LabelFrame(verification_body, text="Scan comments", padding=10)
+        verification_body.add(documents_frame, weight=1)
+        verification_body.add(comments_frame, weight=1)
 
         columns = ("Document", "Applicant (passport)", "Language / translation", "Findings")
         self.tree = ttk.Treeview(documents_frame, columns=columns, show="headings", height=12)
@@ -97,32 +133,378 @@ class VisaAppGUI:
         )
         self.comments.pack(fill="both", expand=True)
         self.comments.configure(state="disabled")
-        self.progress = ttk.Progressbar(comments_frame, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", pady=(10, 0))
+        self.create_financial_report_tab(financial_report_tab)
+        self.show_welcome_screen()
+
+    def show_welcome_screen(self):
+        self.welcome_screen = tk.Frame(self.root, background="#17324d")
+        self.welcome_screen.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.welcome_screen.lift()
+
+        content = tk.Frame(self.welcome_screen, background="#17324d")
+        content.place(relx=0.5, rely=0.5, anchor="center")
+
+        mark = tk.Canvas(
+            content,
+            width=170,
+            height=112,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        mark.pack()
+        mark.create_rectangle(25, 16, 118, 96, fill="#f7f8fa", outline="#d5e1e8", width=2)
+        mark.create_rectangle(39, 29, 66, 82, fill="#d9e7ee", outline="")
+        mark.create_oval(47, 37, 58, 48, fill="#6c9bad", outline="")
+        mark.create_arc(43, 47, 62, 72, start=200, extent=140, fill="#6c9bad", outline="")
+        mark.create_line(76, 38, 106, 38, fill="#91a7b5", width=3)
+        mark.create_line(76, 51, 101, 51, fill="#c0cdd5", width=3)
+        mark.create_line(76, 64, 96, 64, fill="#c0cdd5", width=3)
+        mark.create_rectangle(105, 49, 151, 86, fill="#0d2438", outline="#d5a928", width=2)
+        mark.create_oval(119, 56, 135, 71, fill="#d5a928", outline="")
+        mark.create_line(137, 74, 143, 80, fill="#ffffff", width=3)
+        mark.create_line(143, 80, 155, 66, fill="#ffffff", width=3)
+
+        tk.Label(
+            content,
+            text="Visa Document Verifier",
+            background="#17324d",
+            foreground="#ffffff",
+            font=("Segoe UI", 24, "bold"),
+        ).pack(pady=(8, 4))
+        tk.Label(
+            content,
+            text="Securely review documents, identity, finances, and visa readiness",
+            background="#17324d",
+            foreground="#c7d7e8",
+            font=("Segoe UI", 11),
+        ).pack()
+        progress = ttk.Progressbar(content, mode="indeterminate", length=220)
+        progress.pack(pady=(22, 0))
+        progress.start(18)
+        self.welcome_progress = progress
+        self.root.after(5000, self.dismiss_welcome_screen)
+
+    def dismiss_welcome_screen(self):
+        if not getattr(self, "welcome_screen", None):
+            return
+        self.welcome_progress.stop()
+        self.welcome_screen.destroy()
+        self.welcome_screen = None
+
+    def create_welcome_visual(self, parent):
+        visual = tk.Canvas(
+            parent,
+            width=250,
+            height=86,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        visual.pack(side="right", padx=(20, 4))
+
+        # A restrained document and passport mark for the dashboard welcome area.
+        visual.create_rectangle(18, 14, 143, 76, fill="#f7f8fa", outline="#d5e1e8", width=1)
+        visual.create_rectangle(30, 23, 61, 66, fill="#d9e7ee", outline="")
+        visual.create_oval(39, 30, 52, 43, fill="#6c9bad", outline="")
+        visual.create_arc(35, 41, 56, 61, start=200, extent=140, fill="#6c9bad", outline="")
+        visual.create_line(72, 30, 127, 30, fill="#91a7b5", width=3)
+        visual.create_line(72, 42, 119, 42, fill="#c0cdd5", width=3)
+        visual.create_line(72, 54, 108, 54, fill="#c0cdd5", width=3)
+        visual.create_rectangle(156, 23, 218, 68, fill="#0d2438", outline="#d5a928", width=2)
+        visual.create_oval(176, 31, 198, 53, fill="#d5a928", outline="")
+        visual.create_arc(169, 43, 205, 76, start=200, extent=140, fill="#d5a928", outline="")
+        visual.create_line(207, 56, 214, 63, fill="#ffffff", width=3)
+        visual.create_line(214, 63, 228, 47, fill="#ffffff", width=3)
+        visual.create_line(145, 45, 158, 45, fill="#4bb3a7", width=3)
+        visual.create_polygon(151, 40, 160, 45, 151, 50, fill="#4bb3a7", outline="")
+        self.welcome_visual = visual
+
+    def create_financial_report_tab(self, parent):
+        report_body = ttk.Panedwindow(parent, orient="vertical")
+        report_body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        report_frame = ttk.LabelFrame(report_body, text="Financial overview", padding=10)
+        details_frame = ttk.LabelFrame(report_body, text="Financial statement details", padding=10)
+        report_body.add(report_frame, weight=1)
+        report_body.add(details_frame, weight=1)
+
+        columns = (
+            "Holder", "Role", "Statements", "Currency", "Balance consistency",
+            "Stability", "Sudden deposits", "Credits > 50,000", "Zero balance", "Net savings",
+        )
+        self.financial_report_tree = ttk.Treeview(report_frame, columns=columns, show="headings")
+        for column in columns:
+            self.financial_report_tree.heading(column, text=column)
+        widths = {
+            "Holder": 180, "Role": 120, "Statements": 80, "Currency": 80,
+            "Balance consistency": 145, "Stability": 105, "Sudden deposits": 115,
+            "Credits > 50,000": 125,
+            "Zero balance": 105, "Net savings": 120,
+        }
+        for column, width in widths.items():
+            self.financial_report_tree.column(column, width=width, anchor="w")
+        report_scroll = ttk.Scrollbar(report_frame, orient="vertical", command=self.financial_report_tree.yview)
+        self.financial_report_tree.configure(yscrollcommand=report_scroll.set)
+        self.financial_report_tree.pack(side="left", fill="both", expand=True)
+        report_scroll.pack(side="right", fill="y")
+
+        self.financial_report_details = tk.Text(
+            details_frame,
+            height=9,
+            wrap="word",
+            relief="flat",
+            padx=10,
+            pady=8,
+            background="#f7f8fa",
+            foreground="#354052",
+            font=("Segoe UI", 10),
+        )
+        self.financial_report_details.pack(fill="both", expand=True)
+        self.financial_report_details.configure(state="disabled")
+
+    def populate_financial_report(self, reports):
+        for item_id in self.financial_report_tree.get_children():
+            self.financial_report_tree.delete(item_id)
+        if not reports:
+            self.set_financial_report_details(
+                "No financial statement documents were identified for applicants or invitees."
+            )
+            return
+
+        detail_sections = []
+        for report in reports:
+            self.financial_report_tree.insert(
+                "", "end",
+                values=(
+                    report.holder_name,
+                    report.role,
+                    report.statement_count,
+                    report.currency,
+                    report.balance_consistency,
+                    report.financial_stability,
+                    len(report.sudden_deposits),
+                    len(report.large_credit_deposits),
+                    len(report.zero_balance_periods),
+                    self.format_money(report.net_savings, report.currency),
+                ),
+            )
+            detail_sections.append(self.format_financial_report(report))
+        self.set_financial_report_details("\n\n".join(detail_sections))
+
+    def format_financial_report(self, report: FinancialReport):
+        lines = [
+            f"{report.holder_name} ({report.role})",
+            f"Statements scanned: {report.statement_count}",
+            f"Balance consistency: {report.balance_consistency}",
+            f"Financial stability: {report.financial_stability}",
+            f"Total deposits: {self.format_money(report.total_deposits, report.currency)}",
+            f"Total spending / withdrawals: {self.format_money(report.total_withdrawals, report.currency)}",
+            f"Net savings: {self.format_money(report.net_savings, report.currency)}",
+            f"Savings rate: {self.format_percentage(report.savings_rate)}",
+                "Sudden deposits in last three months:\n"
+                + (self.format_deposit_lines(report.sudden_deposits, report.currency)
+                    if report.sudden_deposits else "None identified"),
+                "Credits over 50,000 in last three months:\n"
+                + (self.format_deposit_lines(report.large_credit_deposits, report.currency)
+                    if report.large_credit_deposits else "None identified"),
+            "Zero-balance periods: "
+            + (", ".join(report.zero_balance_periods) if report.zero_balance_periods else "None identified"),
+        ]
+        if report.warnings:
+            lines.append("Warnings:\n- " + "\n- ".join(report.warnings))
+        else:
+            lines.append("Warnings: None")
+        return "\n".join(lines)
+
+    def set_financial_report_details(self, message):
+        self.financial_report_details.configure(state="normal")
+        self.financial_report_details.delete("1.0", "end")
+        self.financial_report_details.insert("1.0", message)
+        self.financial_report_details.configure(state="disabled")
+
+    def format_money(self, value, currency):
+        if value is None:
+            return "Not available"
+        return f"{currency} {value:,.2f}"
+
+    def format_percentage(self, value):
+        return "Not available" if value is None else f"{value:.1f}%"
+
+    def format_deposit(self, deposit, currency):
+        date = deposit.date or "date unavailable"
+        amount = self.format_money(deposit.amount, currency)
+        description = f" ({deposit.description})" if deposit.description else ""
+        return f"{date}: {amount}{description}"
+
+    def format_deposit_lines(self, deposits, currency):
+        return "\n".join(f"- {self.format_deposit(deposit, currency)}" for deposit in deposits)
+
+    def set_window_icon(self):
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#17324d", to=(2, 1, 14, 15))
+        icon.put("#0d2438", to=(3, 2, 13, 14))
+        icon.put("#eaf0f4", to=(5, 3, 11, 13))
+        icon.put("#d5a928", to=(6, 6, 10, 10))
+        icon.put("#b58512", to=(7, 5, 9, 11))
+        icon.put("#ffffff", to=(4, 4, 5, 12))
+        self.root.iconphoto(True, icon)
+        self.window_icon = icon
 
     def create_menu_bar(self):
         menu_bar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menu_bar, tearoff=False)
         file_menu.add_command(label="Browse folder", command=self.load_folder, accelerator="Ctrl+O")
+        file_menu.add_command(label="Generate PDF report", command=self.generate_report, accelerator="Ctrl+P")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
         menu_bar.add_cascade(label="File", menu=file_menu)
 
         scan_menu = tk.Menu(menu_bar, tearoff=False)
         scan_menu.add_command(label="Run scan", command=self.run_audit, accelerator="F5")
+        scan_menu.add_command(label="Stop scan", command=self.stop_scan, accelerator="Esc")
         scan_menu.add_command(label="Clear results", command=self.clear_results)
         menu_bar.add_cascade(label="Scan", menu=scan_menu)
 
+        route_menu = tk.Menu(menu_bar, tearoff=False)
+        for route in ["Schengen", "UK Visit", "Canada Visitor"]:
+            route_menu.add_radiobutton(
+                label=route,
+                variable=self.jurisdiction_var,
+                value=route,
+            )
+        menu_bar.add_cascade(label="Visa route", menu=route_menu)
+
         help_menu = tk.Menu(menu_bar, tearoff=False)
-        help_menu.add_command(label="About", command=lambda: self.set_comments(
-            "Visa Document Verifier\n\nSelect a folder, choose a visa route, and run a scan."
-        ))
+        help_menu.add_command(label="About", command=self.show_about_dialog)
         menu_bar.add_cascade(label="Help", menu=help_menu)
 
         self.root.configure(menu=menu_bar)
         self.root.bind("<Control-o>", lambda event: self.load_folder())
+        self.root.bind("<Control-p>", lambda event: self.generate_report())
         self.root.bind("<F5>", lambda event: self.run_audit())
+        self.root.bind("<Escape>", lambda event: self.stop_scan())
+
+    def show_about_dialog(self):
+        if getattr(self, "about_window", None) and self.about_window.winfo_exists():
+            self.about_window.lift()
+            self.about_window.focus_force()
+            return
+
+        about = tk.Toplevel(self.root)
+        self.about_window = about
+        about.title("About Visa Document Verifier")
+        about.geometry("560x470")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
+        about.configure(background="#f7f8fa")
+
+        header = tk.Frame(about, background="#17324d", height=150)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        mark = tk.Canvas(
+            header,
+            width=108,
+            height=108,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        mark.pack(side="left", padx=(28, 14), pady=20)
+        mark.create_rectangle(12, 14, 68, 94, fill="#f7f8fa", outline="#d5e1e8", width=2)
+        mark.create_rectangle(22, 27, 40, 80, fill="#d9e7ee", outline="")
+        mark.create_oval(27, 34, 35, 42, fill="#6c9bad", outline="")
+        mark.create_arc(24, 42, 38, 62, start=200, extent=140, fill="#6c9bad", outline="")
+        mark.create_line(46, 36, 62, 36, fill="#91a7b5", width=2)
+        mark.create_line(46, 47, 59, 47, fill="#c0cdd5", width=2)
+        mark.create_rectangle(61, 58, 94, 87, fill="#0d2438", outline="#d5a928", width=2)
+        mark.create_oval(72, 64, 82, 74, fill="#d5a928", outline="")
+        mark.create_line(83, 76, 88, 81, fill="#ffffff", width=2)
+        mark.create_line(88, 81, 98, 69, fill="#ffffff", width=2)
+
+        title = tk.Frame(header, background="#17324d")
+        title.pack(side="left", fill="both", expand=True, pady=28)
+        tk.Label(
+            title,
+            text="Visa Document Verifier",
+            background="#17324d",
+            foreground="#ffffff",
+            font=("Segoe UI", 19, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            title,
+            text=f"Version {APP_VERSION}",
+            background="#17324d",
+            foreground="#c7d7e8",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(5, 0))
+
+        details = tk.Frame(about, background="#f7f8fa", padx=34, pady=24)
+        details.pack(fill="both", expand=True)
+        tk.Label(
+            details,
+            text="Professional document review for visa applications",
+            background="#f7f8fa",
+            foreground="#17324d",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            details,
+            text="Review identity, financial evidence, supporting documents, and consistency risks in one place.",
+            background="#f7f8fa",
+            foreground="#536575",
+            font=("Segoe UI", 10),
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 20))
+
+        info = tk.Frame(details, background="#ffffff", highlightbackground="#d5e1e8", highlightthickness=1)
+        info.pack(fill="x", pady=(0, 20))
+        tk.Label(info, text="Developer", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(13, 2)
+        )
+        tk.Label(info, text="Shino, Samuel", background="#ffffff", foreground="#17324d", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=1, sticky="w", padx=16, pady=(13, 2)
+        )
+        tk.Label(info, text="Phone", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=1, column=0, sticky="w", padx=16, pady=2
+        )
+        tk.Label(info, text="+91 9497329730", background="#ffffff", foreground="#263238", font=("Segoe UI", 10)).grid(
+            row=1, column=1, sticky="w", padx=16, pady=2
+        )
+        tk.Label(info, text="Email", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=2, column=0, sticky="w", padx=16, pady=(2, 13)
+        )
+        tk.Label(info, text="shinosamuel@gmail.com", background="#ffffff", foreground="#263238", font=("Segoe UI", 10)).grid(
+            row=2, column=1, sticky="w", padx=16, pady=(2, 13)
+        )
+
+        license_row = tk.Frame(details, background="#f7f8fa")
+        license_row.pack(fill="x")
+        tk.Label(
+            license_row,
+            text="Copyright © 2026 Shino, Samuel. All rights reserved.\nLicensed under GPL-3.0.",
+            background="#f7f8fa",
+            foreground="#536575",
+            font=("Segoe UI", 9),
+            justify="left",
+        ).pack(side="left")
+        tk.Button(
+            license_row,
+            text="View license",
+            command=lambda: webbrowser.open(LICENSE_URL),
+            background="#167d73",
+            foreground="#ffffff",
+            activebackground="#12665e",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="right")
+
+        ttk.Button(details, text="Close", command=about.destroy).pack(anchor="e", pady=(18, 0))
+        about.protocol("WM_DELETE_WINDOW", about.destroy)
 
     def create_tool_bar(self):
         toolbar = ttk.Frame(self.root, padding=(24, 8), relief="raised")
@@ -134,6 +516,10 @@ class VisaAppGUI:
         scan_button = ttk.Button(toolbar, text="▶", command=self.run_audit, style="Accent.TButton", width=3)
         scan_button.pack(side="left", padx=8)
         self.add_tooltip(scan_button, "Scan and verify the selected documents")
+
+        self.stop_scan_button = ttk.Button(toolbar, text="■", command=self.stop_scan, width=3, state="disabled")
+        self.stop_scan_button.pack(side="left", padx=8)
+        self.add_tooltip(self.stop_scan_button, "Stop the current scan")
 
         clear_button = ttk.Button(toolbar, text="✕", command=self.clear_results, width=3)
         clear_button.pack(side="left", padx=8)
@@ -209,34 +595,85 @@ class VisaAppGUI:
 
         self.clear_results()
         self.set_comments("Starting scan...")
-        self.progress.configure(value=0)
         self.status_var.set("Scanning documents...")
         self.status_progress.configure(value=0)
+        self.run_button.configure(state="disabled")
+        self.stop_scan_button.configure(state="normal")
+        self.scan_cancel_event = Event()
 
         def report_progress(message, completed, total):
-            self.set_comments(message)
-            self.status_var.set(message)
             progress_value = (completed / total * 100) if total else 0
-            self.progress.configure(value=progress_value)
-            self.status_progress.configure(value=progress_value)
-            self.root.update_idletasks()
+            self.root.after(0, self.update_scan_progress, message, progress_value)
 
-        try:
-            grouped_documents = scan_folder(
-                self.folder_path,
-                self.jurisdiction_var.get(),
-                progress_callback=report_progress,
-            )
-        except Exception as error:
-            self.status_var.set("Scan failed")
-            self.show_error(f"Scan failed: {error}")
+        def scan_in_background():
+            try:
+                grouped_documents = scan_folder(
+                    self.folder_path,
+                    self.jurisdiction_var.get(),
+                    progress_callback=report_progress,
+                    cancel_event=self.scan_cancel_event,
+                )
+            except ScanCancelledError:
+                self.root.after(0, self.finish_scan_cancelled)
+                return
+            except Exception as error:
+                self.root.after(0, self.finish_scan_error, error)
+                return
+            self.root.after(0, self.finish_scan, grouped_documents)
+
+        threading.Thread(target=scan_in_background, name="visa-scan", daemon=True).start()
+
+    def update_scan_progress(self, message, progress_value):
+        if self.scan_cancel_event is None or self.scan_cancel_event.is_set():
             return
+        self.set_comments(message)
+        self.status_var.set(message)
+        self.status_progress.configure(value=progress_value)
+
+    def finish_scan_error(self, error):
+        self.run_button.configure(state="normal")
+        self.stop_scan_button.configure(state="disabled")
+        self.scan_cancel_event = None
+        self.status_var.set("Scan failed")
+        self.show_error(f"Scan failed: {error}")
+
+    def finish_scan_cancelled(self):
+        self.run_button.configure(state="normal")
+        self.stop_scan_button.configure(state="disabled")
+        self.scan_cancel_event = None
+        self.status_var.set("Scan stopped")
+        self.status_progress.configure(value=0)
+        self.set_comments("Scan stopped. No partial results were displayed.")
+
+    def stop_scan(self):
+        if self.scan_cancel_event is None:
+            return
+        self.scan_cancel_event.set()
+        self.stop_scan_button.configure(state="disabled")
+        self.status_var.set("Stopping scan...")
+        self.set_comments("Stopping scan and cancelling pending documents...")
+
+    def finish_scan(self, grouped_documents):
+        self.run_button.configure(state="normal")
+        self.stop_scan_button.configure(state="disabled")
+        self.scan_cancel_event = None
 
         if not grouped_documents:
             self.status_var.set("Scan finished - no documents found")
             self.show_error("No supported documents found in the selected folder.")
             return
 
+        self.status_var.set("Analyzing financial records...")
+        self.set_comments("Analyzing financial records...")
+        self.status_progress.configure(value=0)
+        self.root.update_idletasks()
+        financial_reports = build_financial_reports(
+            grouped_documents,
+            progress_callback=self.update_financial_progress,
+            jurisdiction=self.jurisdiction_var.get(),
+        )
+        self.last_financial_reports = financial_reports
+        self.populate_financial_report(financial_reports)
         total_documents = 0
         total_findings = 0
         applicant_group_count = 0
@@ -311,7 +748,15 @@ class VisaAppGUI:
         self.applicant_count.configure(text=str(applicant_group_count))
         self.issue_count.configure(text=str(total_findings))
         self.update_findings_row_height()
-        self.progress.configure(value=100)
+        invitee_folder = Path(self.folder_path) / "invitee"
+        folder_structure_note = ""
+        if not invitee_folder.is_dir():
+            folder_structure_note = (
+                "\n\nINFO: Expected optional folder 'invitee' was not found. "
+                "Invitee/host documents were not scanned. Add an 'invitee' folder "
+                "inside the selected application folder if sponsor or host documents "
+                "are required for this application."
+            )
         self.status_progress.configure(value=100)
         self.status_var.set(
             f"Scan complete - {total_documents} documents, "
@@ -320,19 +765,78 @@ class VisaAppGUI:
         finding_summary = "\n".join(
             f"{applicant}: {finding}" for applicant, finding in all_findings
         )
-        self.set_comments(
+        scan_comments = (
             "Scan complete.\n\n"
             + "\n".join(comments)
             + ("\n\nFindings:\n" + finding_summary if finding_summary else "\n\nNo findings.")
+            + folder_structure_note
         )
+        self.last_scan_comments = scan_comments
+        self.last_scan_findings = all_findings
+        self.set_comments(scan_comments)
+        self.report_button.configure(state="normal")
+
+    def generate_report(self):
+        if not self.folder_path or not self.last_financial_reports:
+            self.show_error("Run a scan before generating a PDF report.")
+            return
+
+        output_path = Path(self.folder_path) / (
+            f"visa_verification_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        )
+        self.report_button.configure(state="disabled")
+        self.status_var.set("Generating professional PDF report with Gemini...")
+        self.set_comments("Generating professional PDF report with Gemini...")
+
+        def create_report_in_background():
+            try:
+                report_path = generate_pdf_report(
+                    output_path,
+                    self.jurisdiction_var.get(),
+                    self.folder_path,
+                    self.last_scan_comments,
+                    self.last_scan_findings,
+                    self.last_financial_reports,
+                )
+            except Exception as error:
+                self.root.after(0, self.finish_report_error, error)
+                return
+            self.root.after(0, self.finish_report, report_path)
+
+        threading.Thread(target=create_report_in_background, name="pdf-report", daemon=True).start()
+
+    def finish_report(self, report_path):
+        self.report_button.configure(state="normal")
+        self.status_var.set(f"PDF report ready: {report_path.name}")
+        self.set_comments(f"PDF report created and opened:\n{report_path}")
+        os.startfile(str(report_path))
+
+    def finish_report_error(self, error):
+        self.report_button.configure(state="normal")
+        self.status_var.set("PDF report failed")
+        self.set_comments(f"PDF report failed: {error}")
+
+    def update_financial_progress(self, message, completed, total):
+        progress_value = (completed / total * 100) if total else 0
+        self.status_var.set(message)
+        self.set_comments(message)
+        self.status_progress.configure(value=progress_value)
+        self.root.update_idletasks()
 
     def clear_results(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
+        for item_id in self.financial_report_tree.get_children():
+            self.financial_report_tree.delete(item_id)
         ttk.Style(self.root).configure("Treeview", rowheight=48)
         self.document_count.configure(text="0")
         self.applicant_count.configure(text="0")
         self.issue_count.configure(text="0")
+        self.last_scan_comments = ""
+        self.last_scan_findings = []
+        self.last_financial_reports = []
+        self.report_button.configure(state="disabled")
+        self.set_financial_report_details("No financial report available.")
 
     def set_comments(self, message):
         self.comments.configure(state="normal")
@@ -370,7 +874,6 @@ class VisaAppGUI:
         self.clear_results()
         self.status_var.set("Scan error")
         self.status_progress.stop()
-        self.progress.stop()
         self.set_comments(message)
         self.tree.insert("", "end", values=("Scan status", "", "", message), tags=("issue",))
 
