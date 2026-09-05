@@ -1,4 +1,9 @@
+# VisaVerifier runtime dependencies
+# Python 3.10+ standard-library modules (tkinter, threading, pathlib, etc.)
+# do not need to be installed with pip.
+
 google-genai>=2.22.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 httpx>=0.24.0
+reportlab>=4.0.0

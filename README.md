@@ -1,3 +1,4 @@
+After a scan, open the **Financial report** tab for a financial summary. Every applicant passport found in the selected folder root receives a summary row, including applicants without a bank statement. The report compares adjacent opening and closing balances, estimates stability from extracted closing balances, lists Gemini-identified sudden deposits and every extracted credit greater than 50,000 from the last three months, records zero-balance periods, spending, and savings.
 # VisaVerifier
 
 VisaVerifier is a Windows desktop application for reviewing visa application documents. It uses Google Gemini to identify and extract document data, groups documents by passport holder, and reports identity, address, translation, anomaly, and route-specific findings in a Tkinter dashboard.
@@ -15,6 +16,8 @@ VisaVerifier is a Windows desktop application for reviewing visa application doc
 - Apply route-specific checks, including the Schengen medical coverage threshold.
 - Process documents concurrently with progress reporting.
 - Review document-level and applicant-group findings in the desktop dashboard.
+- Review a separate financial report for applicants and invitees, including balance carry-forward, stability, recent deposits, zero-balance periods, spending, and savings.
+- Generate and open a professional PDF report containing Gemini's executive summary, scan comments, verification findings, and financial statement details.
 
 ## Requirements
 
@@ -41,7 +44,7 @@ GEMINI_API_KEY=your_gemini_api_key
 # Optional: override the default model
 GEMINI_MODEL=gemini-flash-latest
 # Optional: number of concurrent document requests (default: 4)
-SCAN_WORKERS=4
+SCAN_WORKERS=8
 ```
 
 ## Start the application
@@ -57,7 +60,11 @@ The dashboard opens with these controls:
 | Browse folder | Select the application folder to scan. `Ctrl+O` also opens the folder picker. |
 | Visa route | Choose `Schengen`, `UK Visit`, or `Canada Visitor`. |
 | Run scan | Upload and analyze eligible files using Gemini. `F5` also starts a scan. |
+| Generate PDF report | Send the completed scan comments and financial details to Gemini, create a formatted PDF in the selected folder, and open it. |
+| Stop scan | Stop the active scan from the toolbar. Queued documents are cancelled and partial results are not displayed as complete. |
 | Clear results | Remove the current table and counters. |
+
+After a scan, open the **Financial report** tab for a financial summary. Each applicant or invitee with a detected bank statement receives a summary row and a detailed report. The report compares adjacent opening and closing balances, estimates stability from extracted closing balances, lists Gemini-identified sudden deposits from the last three months, records zero-balance periods, and calculates total deposits, withdrawals, net savings, and savings rate when the source contains enough values. `Insufficient history` and `Not available` mean the statement did not expose enough reliable data for that calculation; they are not negative findings.
 
 ## Folder scan format
 
@@ -183,7 +190,7 @@ The application also defines an `ApplicationVerificationResult` model containing
 | --- | --- | --- | --- |
 | `GEMINI_API_KEY` | Yes | None | API credential used by the Gemini client. |
 | `GEMINI_MODEL` | No | `gemini-flash-latest` | First model attempted for extraction. |
-| `SCAN_WORKERS` | No | `4` | Maximum concurrent extraction workers; values below 1 are clamped to 1. |
+| `SCAN_WORKERS` | No | `8` | Maximum concurrent extraction workers, capped at 16 to avoid uncontrolled API pressure. |
 
 The scanner retries selected API and HTTP failures and tries configured fallback Gemini models. A scan can still fail when the API key is invalid, quota is exhausted, files cannot be read, or all model attempts fail.
 

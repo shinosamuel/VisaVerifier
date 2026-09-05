@@ -2,8 +2,9 @@ import os
 import mimetypes
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Event
 from typing import Callable, DefaultDict, List
 from google import genai
 from google.genai import errors
@@ -33,10 +34,15 @@ MODEL_FALLBACKS = (
     "gemini-flash-lite-latest",
 )
 RETRYABLE_API_CODES = {401, 403, 408, 429, 500, 502, 503, 504}
-MAX_SCAN_WORKERS = max(1, int(os.getenv("SCAN_WORKERS", "4")))
+MAX_SCAN_WORKERS = min(16, max(1, int(os.getenv("SCAN_WORKERS", "8"))))
 
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic"}
 EXCLUDED_DIRECTORIES = {"misc", "invitee"}
+GENERATED_REPORT_PREFIX = "visa_verification_report_"
+
+
+class ScanCancelledError(Exception):
+    """Raised when the user stops a folder scan."""
 
 def extract_document_data(
     file_path: str,
@@ -58,6 +64,13 @@ def extract_document_data(
         "Extract the passport number when visible, every personal name printed on the document, "
         "and identify passport relationship names such as father, mother, or spouse. "
         "Extract the full address when visible. "
+        "For bank statements, extract the currency and every visible monthly or statement-period summary. "
+        "For each period, extract opening balance, closing balance, total deposits, total withdrawals, "
+        "and whether the balance reached zero. Also list every visible credit/deposit transaction "
+        "greater than 50000 from the last three months, plus other notable deposits, including date, "
+        "amount, description, and whether the deposit appears sudden or unusual. Do not omit a credit "
+        "over 50000 because it is not marked sudden. "
+        "Use empty arrays or null values when this information is not visible; do not invent values. "
         "Documents in the invitee folder are supporting invitee/host documents, not applicant documents. "
         "The invitee's passport is optional and must not be treated as a missing applicant passport. "
         f"Invitee folder context: {invitee_context or 'not available'}"
@@ -110,7 +123,9 @@ def scan_folder(
     folder_path: str,
     destination: str,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    cancel_event: Event | None = None,
 ) -> DefaultDict[str, List[ExtractedDocument]]:
+    _raise_if_cancelled(cancel_event)
     grouped_documents: DefaultDict[str, List[ExtractedDocument]] = defaultdict(list)
     root = Path(folder_path)
     invitee_path = next((path for path in root.iterdir() if path.is_dir() and path.name.casefold() == "invitee"), None)
@@ -121,6 +136,8 @@ def scan_folder(
 
     def is_candidate(path: Path, include_invitee: bool = False) -> bool:
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            return False
+        if path.name.casefold().startswith(GENERATED_REPORT_PREFIX):
             return False
         relative_parts = {part.casefold() for part in path.relative_to(root).parts[:-1]}
         excluded = EXCLUDED_DIRECTORIES - ({"invitee"} if include_invitee else set())
@@ -148,6 +165,7 @@ def scan_folder(
         "Identifying root document",
         progress_offset=0,
         progress_total=total_paths,
+        cancel_event=cancel_event,
     )
 
     passport_documents = [
@@ -161,25 +179,30 @@ def scan_folder(
     passport_paths = {
         document.source_filename for document in passport_documents
     }
+    passport_holder_keys = {
+        id(document): _identity_key(document)
+        or f"passport:{(document.source_filename or str(index)).casefold()}"
+        for index, document in enumerate(passport_documents)
+    }
     holders = {
-        _identity_key(document): document
+        passport_holder_keys[id(document)]: document
         for document in passport_documents
-        if _identity_key(document)
     }
     for document in passport_documents:
-        grouped_documents[_identity_key(document)].append(document)
-
+        grouped_documents[passport_holder_keys[id(document)]].append(document)
     root_document_by_name = {
         document.source_filename: document for document in root_documents
     }
-    nested_documents = _extract_documents_parallel(
-        nested_paths,
+    nested_documents, invitee_documents = _extract_document_batches_parallel(
+        [
+            (nested_paths, False, "Identifying document", len(root_paths)),
+            (invitee_paths, True, "Reading invitee document", len(root_paths) + len(nested_paths)),
+        ],
         destination,
         invitee_context,
         progress_callback,
-        "Identifying document",
-        progress_offset=len(root_paths),
-        progress_total=total_paths,
+        total_paths,
+        cancel_event,
     )
     for path, document in zip(nested_paths, nested_documents):
         holder_key = _match_passport_holder(document, holders)
@@ -195,16 +218,6 @@ def scan_folder(
             grouped_documents[holder_key].append(document)
 
     if invitee_path:
-        invitee_documents = _extract_documents_parallel(
-            invitee_paths,
-            destination,
-            invitee_context,
-            progress_callback,
-            "Reading invitee document",
-            is_invitee_document=True,
-            progress_offset=len(root_paths) + len(nested_paths),
-            progress_total=total_paths,
-        )
         for path, document in zip(invitee_paths, invitee_documents):
             invitee_key = _identity_key(document) or f"invitee:{path.stem.casefold()}"
             grouped_documents[invitee_key].append(document)
@@ -222,6 +235,11 @@ def _report(
         callback(message, completed, total)
 
 
+def _raise_if_cancelled(cancel_event: Event | None) -> None:
+    if cancel_event and cancel_event.is_set():
+        raise ScanCancelledError()
+
+
 def _extract_documents_parallel(
     paths: list[Path],
     destination: str,
@@ -231,6 +249,7 @@ def _extract_documents_parallel(
     is_invitee_document: bool = False,
     progress_offset: int = 0,
     progress_total: int = 0,
+    cancel_event: Event | None = None,
 ) -> list[ExtractedDocument]:
     if not paths:
         return []
@@ -249,8 +268,15 @@ def _extract_documents_parallel(
             for index, path in enumerate(paths)
         }
         for completed_count, future in enumerate(as_completed(futures), start=1):
+            if cancel_event and cancel_event.is_set():
+                for pending_future in futures:
+                    pending_future.cancel()
+                raise ScanCancelledError()
             index = futures[future]
-            documents[index] = future.result()
+            try:
+                documents[index] = future.result()
+            except CancelledError:
+                raise ScanCancelledError() from None
             _report(
                 progress_callback,
                 f"{progress_label} {completed_count}/{len(paths)}: {paths[index].name}",
@@ -258,7 +284,65 @@ def _extract_documents_parallel(
                 progress_total or len(paths),
             )
 
+            _raise_if_cancelled(cancel_event)
+
     return [document for document in documents if document is not None]
+
+
+def _extract_document_batches_parallel(
+    batches: list[tuple[list[Path], bool, str, int]],
+    destination: str,
+    invitee_context: str,
+    progress_callback: Callable[[str, int, int], None] | None,
+    progress_total: int,
+    cancel_event: Event | None = None,
+) -> tuple[list[ExtractedDocument], list[ExtractedDocument]]:
+    batch_results: list[list[ExtractedDocument | None]] = [
+        [None] * len(paths) for paths, _, _, _ in batches
+    ]
+    tasks = [
+        (batch_index, path_index, path, is_invitee, label, offset)
+        for batch_index, (paths, is_invitee, label, offset) in enumerate(batches)
+        for path_index, path in enumerate(paths)
+    ]
+    if not tasks:
+        return [], []
+
+    completed_by_batch = [0] * len(batches)
+    with ThreadPoolExecutor(max_workers=min(MAX_SCAN_WORKERS, len(tasks)), thread_name_prefix="visa-scan") as executor:
+        futures = {
+            executor.submit(
+                extract_document_data,
+                str(path),
+                destination,
+                invitee_context,
+                is_invitee,
+            ): (batch_index, path_index, path, label, offset)
+            for batch_index, path_index, path, is_invitee, label, offset in tasks
+        }
+        for future in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                for pending_future in futures:
+                    pending_future.cancel()
+                raise ScanCancelledError()
+            batch_index, path_index, path, label, offset = futures[future]
+            try:
+                batch_results[batch_index][path_index] = future.result()
+            except CancelledError:
+                raise ScanCancelledError() from None
+            completed_by_batch[batch_index] += 1
+            _report(
+                progress_callback,
+                f"{label} {completed_by_batch[batch_index]}/{len(batches[batch_index][0])}: {path.name}",
+                offset + completed_by_batch[batch_index],
+                progress_total,
+            )
+
+    _raise_if_cancelled(cancel_event)
+    return tuple(
+        [document for document in results if document is not None]
+        for results in batch_results
+    )
 
 
 def _identity_key(document: ExtractedDocument) -> str:
