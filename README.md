@@ -120,6 +120,7 @@ For each applicant group, the application can report:
 - Address mismatch using normalized address, place, postal-code, and meaningful-token comparisons.
 - Unexpected names printed on a document.
 - Anomalies returned by Gemini.
+- Supporting-document review for cover letters, declarations, invitation letters, itineraries, employment and income evidence, accommodation, and sponsorship documents, including identity, dates, purpose, funds, employment, sponsor, signature, and consistency risks.
 - Foreign-language documents without a certified translation.
 - For `Schengen`, missing insurance or coverage below EUR 30,000.
 

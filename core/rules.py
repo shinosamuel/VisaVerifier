@@ -1,6 +1,24 @@
 import re
+from difflib import SequenceMatcher
 from typing import Iterable, List
 from .schemas import ExtractedDocument
+
+_COMMON_NAME_FORMS = {
+    "alexander": {"alex"},
+    "benjamin": {"ben", "benny"},
+    "charles": {"charlie", "chuck"},
+    "daniel": {"dan", "danny"},
+    "elizabeth": {"liz", "beth", "lizzy"},
+    "james": {"jim", "jimmy"},
+    "jonathan": {"jon", "johnny"},
+    "katherine": {"kate", "kathy", "katie"},
+    "margaret": {"maggie", "meg", "peggy"},
+    "michael": {"mike"},
+    "robert": {"bob", "rob", "bobby"},
+    "samuel": {"sam", "sammy"},
+    "thomas": {"tom", "tommy"},
+    "william": {"will", "bill", "billy"},
+}
 
 def _normalise(value: str) -> str:
     return " ".join(value.casefold().replace("-", " ").split())
@@ -77,6 +95,36 @@ def _is_name_order_swapped(first_name: str, second_name: str) -> bool:
     return len(first_parts) >= 2 and second_parts == list(reversed(first_parts))
 
 
+def _name_tokens_match(first_token: str, second_token: str) -> bool:
+    if first_token == second_token:
+        return True
+    if len(first_token) == 1 or len(second_token) == 1:
+        return first_token[0] == second_token[0]
+    if first_token.startswith(second_token) or second_token.startswith(first_token):
+        return len(min(first_token, second_token, key=len)) >= 3
+    if second_token in _COMMON_NAME_FORMS.get(first_token, set()):
+        return True
+    if first_token in _COMMON_NAME_FORMS.get(second_token, set()):
+        return True
+    return len(first_token) >= 4 and len(second_token) >= 4 and SequenceMatcher(
+        None, first_token, second_token
+    ).ratio() >= 0.86
+
+
+def _names_are_similar(first_name: str, second_name: str) -> bool:
+    first_parts = _normalise(first_name).split()
+    second_parts = _normalise(second_name).split()
+    if len(first_parts) < 2 or len(first_parts) != len(second_parts):
+        return False
+    return all(
+        _name_tokens_match(first_token, second_token)
+        for first_token, second_token in zip(first_parts, second_parts)
+    ) or all(
+        _name_tokens_match(first_token, second_token)
+        for first_token, second_token in zip(first_parts, reversed(second_parts))
+    )
+
+
 def run_cross_validation_rules(
     docs: List[ExtractedDocument],
     jurisdiction: str,
@@ -112,6 +160,11 @@ def run_cross_validation_rules(
                     f"INFO: First/last name order swapped in {doc.document_type}: "
                     f"'{doc.applicant_name}' vs passport '{passport.applicant_name}'"
                 )
+            elif document_name != passport_name and _names_are_similar(doc.applicant_name, passport.applicant_name):
+                flags.append(
+                    f"INFO: Similar or shortened applicant name in {doc.document_type}: "
+                    f"'{doc.applicant_name}' vs passport '{passport.applicant_name}'"
+                )
             elif document_name != passport_name:
                 flags.append(f"ERROR: Name mismatch in {doc.document_type}: '{doc.applicant_name}' vs '{passport.applicant_name}'")
 
@@ -139,9 +192,6 @@ def run_cross_validation_rules(
             if name
         }
         document_names = {_normalise(name) for name in [doc.applicant_name, *doc.names_on_document] if name}
-        is_bank_statement = "bank" in doc.document_type.casefold() and "statement" in doc.document_type.casefold()
-        if is_bank_statement:
-            document_names = {_normalise(doc.applicant_name)} if doc.applicant_name else set()
         for name in sorted(document_names - holder_names):
             if doc.applicant_name and name == _normalise(doc.applicant_name):
                 continue
@@ -151,8 +201,13 @@ def run_cross_validation_rules(
                         f"INFO: First/last name order swapped in {doc.document_type}: "
                         f"'{name}' vs passport '{passport.applicant_name}'"
                     )
+                elif _names_are_similar(name, passport.applicant_name or ""):
+                    flags.append(
+                        f"INFO: Similar or shortened name in {doc.document_type}: "
+                        f"'{name}' is similar to passport '{passport.applicant_name}'"
+                    )
                 else:
-                    flags.append(f"ERROR: Name mismatch in {doc.document_type}: '{name}' is not on the passport")
+                    flags.append(f"INFO: New name found in {doc.document_type}: '{name}' is not on the passport")
 
         flags.extend(
             f"{doc.document_type}: {anomaly}"

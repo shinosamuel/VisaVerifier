@@ -2,6 +2,7 @@ import tkinter as tk
 import threading
 import sys
 import os
+import webbrowser
 from datetime import datetime
 from threading import Event
 from tkinter import ttk, filedialog
@@ -17,6 +18,9 @@ from core.pdf_report import generate_pdf_report
 from core.rules import run_cross_validation_rules
 from core.scanner import ScanCancelledError, scan_folder
 
+APP_VERSION = "1.0.0"
+LICENSE_URL = "https://github.com/shinosamuel/VisaVerifier#GPL-3.0-1-ov-file"
+
 class VisaAppGUI:
     def __init__(self, root):
         self.root = root
@@ -30,12 +34,14 @@ class VisaAppGUI:
         self.last_scan_comments = ""
         self.last_scan_findings = []
         self.last_financial_reports = []
+        self.jurisdiction_var = tk.StringVar(value="Schengen")
         self.setup_styles()
         self.create_menu_bar()
         self.create_tool_bar()
 
         header = ttk.Frame(root, style="Header.TFrame", padding=(24, 18, 24, 16))
         header.pack(fill="x")
+        self.create_welcome_visual(header)
         ttk.Label(header, text="Visa Document Verifier", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
@@ -46,7 +52,6 @@ class VisaAppGUI:
         control_frame = ttk.Frame(root, padding=(24, 14, 24, 10))
         control_frame.pack(fill="x")
         ttk.Button(control_frame, text="Browse folder", command=self.load_folder).pack(side="left")
-        self.jurisdiction_var = tk.StringVar(value="Schengen")
         ttk.Label(control_frame, text="Visa route").pack(side="left", padx=(24, 8))
         ttk.Combobox(
             control_frame,
@@ -129,6 +134,89 @@ class VisaAppGUI:
         self.comments.pack(fill="both", expand=True)
         self.comments.configure(state="disabled")
         self.create_financial_report_tab(financial_report_tab)
+        self.show_welcome_screen()
+
+    def show_welcome_screen(self):
+        self.welcome_screen = tk.Frame(self.root, background="#17324d")
+        self.welcome_screen.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.welcome_screen.lift()
+
+        content = tk.Frame(self.welcome_screen, background="#17324d")
+        content.place(relx=0.5, rely=0.5, anchor="center")
+
+        mark = tk.Canvas(
+            content,
+            width=170,
+            height=112,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        mark.pack()
+        mark.create_rectangle(25, 16, 118, 96, fill="#f7f8fa", outline="#d5e1e8", width=2)
+        mark.create_rectangle(39, 29, 66, 82, fill="#d9e7ee", outline="")
+        mark.create_oval(47, 37, 58, 48, fill="#6c9bad", outline="")
+        mark.create_arc(43, 47, 62, 72, start=200, extent=140, fill="#6c9bad", outline="")
+        mark.create_line(76, 38, 106, 38, fill="#91a7b5", width=3)
+        mark.create_line(76, 51, 101, 51, fill="#c0cdd5", width=3)
+        mark.create_line(76, 64, 96, 64, fill="#c0cdd5", width=3)
+        mark.create_rectangle(105, 49, 151, 86, fill="#0d2438", outline="#d5a928", width=2)
+        mark.create_oval(119, 56, 135, 71, fill="#d5a928", outline="")
+        mark.create_line(137, 74, 143, 80, fill="#ffffff", width=3)
+        mark.create_line(143, 80, 155, 66, fill="#ffffff", width=3)
+
+        tk.Label(
+            content,
+            text="Visa Document Verifier",
+            background="#17324d",
+            foreground="#ffffff",
+            font=("Segoe UI", 24, "bold"),
+        ).pack(pady=(8, 4))
+        tk.Label(
+            content,
+            text="Securely review documents, identity, finances, and visa readiness",
+            background="#17324d",
+            foreground="#c7d7e8",
+            font=("Segoe UI", 11),
+        ).pack()
+        progress = ttk.Progressbar(content, mode="indeterminate", length=220)
+        progress.pack(pady=(22, 0))
+        progress.start(18)
+        self.welcome_progress = progress
+        self.root.after(5000, self.dismiss_welcome_screen)
+
+    def dismiss_welcome_screen(self):
+        if not getattr(self, "welcome_screen", None):
+            return
+        self.welcome_progress.stop()
+        self.welcome_screen.destroy()
+        self.welcome_screen = None
+
+    def create_welcome_visual(self, parent):
+        visual = tk.Canvas(
+            parent,
+            width=250,
+            height=86,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        visual.pack(side="right", padx=(20, 4))
+
+        # A restrained document and passport mark for the dashboard welcome area.
+        visual.create_rectangle(18, 14, 143, 76, fill="#f7f8fa", outline="#d5e1e8", width=1)
+        visual.create_rectangle(30, 23, 61, 66, fill="#d9e7ee", outline="")
+        visual.create_oval(39, 30, 52, 43, fill="#6c9bad", outline="")
+        visual.create_arc(35, 41, 56, 61, start=200, extent=140, fill="#6c9bad", outline="")
+        visual.create_line(72, 30, 127, 30, fill="#91a7b5", width=3)
+        visual.create_line(72, 42, 119, 42, fill="#c0cdd5", width=3)
+        visual.create_line(72, 54, 108, 54, fill="#c0cdd5", width=3)
+        visual.create_rectangle(156, 23, 218, 68, fill="#0d2438", outline="#d5a928", width=2)
+        visual.create_oval(176, 31, 198, 53, fill="#d5a928", outline="")
+        visual.create_arc(169, 43, 205, 76, start=200, extent=140, fill="#d5a928", outline="")
+        visual.create_line(207, 56, 214, 63, fill="#ffffff", width=3)
+        visual.create_line(214, 63, 228, 47, fill="#ffffff", width=3)
+        visual.create_line(145, 45, 158, 45, fill="#4bb3a7", width=3)
+        visual.create_polygon(151, 40, 160, 45, 151, 50, fill="#4bb3a7", outline="")
+        self.welcome_visual = visual
 
     def create_financial_report_tab(self, parent):
         report_body = ttk.Panedwindow(parent, orient="vertical")
@@ -266,24 +354,157 @@ class VisaAppGUI:
 
         file_menu = tk.Menu(menu_bar, tearoff=False)
         file_menu.add_command(label="Browse folder", command=self.load_folder, accelerator="Ctrl+O")
+        file_menu.add_command(label="Generate PDF report", command=self.generate_report, accelerator="Ctrl+P")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
         menu_bar.add_cascade(label="File", menu=file_menu)
 
         scan_menu = tk.Menu(menu_bar, tearoff=False)
         scan_menu.add_command(label="Run scan", command=self.run_audit, accelerator="F5")
+        scan_menu.add_command(label="Stop scan", command=self.stop_scan, accelerator="Esc")
         scan_menu.add_command(label="Clear results", command=self.clear_results)
         menu_bar.add_cascade(label="Scan", menu=scan_menu)
 
+        route_menu = tk.Menu(menu_bar, tearoff=False)
+        for route in ["Schengen", "UK Visit", "Canada Visitor"]:
+            route_menu.add_radiobutton(
+                label=route,
+                variable=self.jurisdiction_var,
+                value=route,
+            )
+        menu_bar.add_cascade(label="Visa route", menu=route_menu)
+
         help_menu = tk.Menu(menu_bar, tearoff=False)
-        help_menu.add_command(label="About", command=lambda: self.set_comments(
-            "Visa Document Verifier\n\nSelect a folder, choose a visa route, and run a scan."
-        ))
+        help_menu.add_command(label="About", command=self.show_about_dialog)
         menu_bar.add_cascade(label="Help", menu=help_menu)
 
         self.root.configure(menu=menu_bar)
         self.root.bind("<Control-o>", lambda event: self.load_folder())
+        self.root.bind("<Control-p>", lambda event: self.generate_report())
         self.root.bind("<F5>", lambda event: self.run_audit())
+        self.root.bind("<Escape>", lambda event: self.stop_scan())
+
+    def show_about_dialog(self):
+        if getattr(self, "about_window", None) and self.about_window.winfo_exists():
+            self.about_window.lift()
+            self.about_window.focus_force()
+            return
+
+        about = tk.Toplevel(self.root)
+        self.about_window = about
+        about.title("About Visa Document Verifier")
+        about.geometry("560x470")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
+        about.configure(background="#f7f8fa")
+
+        header = tk.Frame(about, background="#17324d", height=150)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        mark = tk.Canvas(
+            header,
+            width=108,
+            height=108,
+            background="#17324d",
+            highlightthickness=0,
+        )
+        mark.pack(side="left", padx=(28, 14), pady=20)
+        mark.create_rectangle(12, 14, 68, 94, fill="#f7f8fa", outline="#d5e1e8", width=2)
+        mark.create_rectangle(22, 27, 40, 80, fill="#d9e7ee", outline="")
+        mark.create_oval(27, 34, 35, 42, fill="#6c9bad", outline="")
+        mark.create_arc(24, 42, 38, 62, start=200, extent=140, fill="#6c9bad", outline="")
+        mark.create_line(46, 36, 62, 36, fill="#91a7b5", width=2)
+        mark.create_line(46, 47, 59, 47, fill="#c0cdd5", width=2)
+        mark.create_rectangle(61, 58, 94, 87, fill="#0d2438", outline="#d5a928", width=2)
+        mark.create_oval(72, 64, 82, 74, fill="#d5a928", outline="")
+        mark.create_line(83, 76, 88, 81, fill="#ffffff", width=2)
+        mark.create_line(88, 81, 98, 69, fill="#ffffff", width=2)
+
+        title = tk.Frame(header, background="#17324d")
+        title.pack(side="left", fill="both", expand=True, pady=28)
+        tk.Label(
+            title,
+            text="Visa Document Verifier",
+            background="#17324d",
+            foreground="#ffffff",
+            font=("Segoe UI", 19, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            title,
+            text=f"Version {APP_VERSION}",
+            background="#17324d",
+            foreground="#c7d7e8",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(5, 0))
+
+        details = tk.Frame(about, background="#f7f8fa", padx=34, pady=24)
+        details.pack(fill="both", expand=True)
+        tk.Label(
+            details,
+            text="Professional document review for visa applications",
+            background="#f7f8fa",
+            foreground="#17324d",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            details,
+            text="Review identity, financial evidence, supporting documents, and consistency risks in one place.",
+            background="#f7f8fa",
+            foreground="#536575",
+            font=("Segoe UI", 10),
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 20))
+
+        info = tk.Frame(details, background="#ffffff", highlightbackground="#d5e1e8", highlightthickness=1)
+        info.pack(fill="x", pady=(0, 20))
+        tk.Label(info, text="Developer", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(13, 2)
+        )
+        tk.Label(info, text="Shino, Samuel", background="#ffffff", foreground="#17324d", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=1, sticky="w", padx=16, pady=(13, 2)
+        )
+        tk.Label(info, text="Phone", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=1, column=0, sticky="w", padx=16, pady=2
+        )
+        tk.Label(info, text="+91 9497329730", background="#ffffff", foreground="#263238", font=("Segoe UI", 10)).grid(
+            row=1, column=1, sticky="w", padx=16, pady=2
+        )
+        tk.Label(info, text="Email", background="#ffffff", foreground="#6b7280", font=("Segoe UI", 9)).grid(
+            row=2, column=0, sticky="w", padx=16, pady=(2, 13)
+        )
+        tk.Label(info, text="shinosamuel@gmail.com", background="#ffffff", foreground="#263238", font=("Segoe UI", 10)).grid(
+            row=2, column=1, sticky="w", padx=16, pady=(2, 13)
+        )
+
+        license_row = tk.Frame(details, background="#f7f8fa")
+        license_row.pack(fill="x")
+        tk.Label(
+            license_row,
+            text="Copyright © 2026 Shino, Samuel. All rights reserved.\nLicensed under GPL-3.0.",
+            background="#f7f8fa",
+            foreground="#536575",
+            font=("Segoe UI", 9),
+            justify="left",
+        ).pack(side="left")
+        tk.Button(
+            license_row,
+            text="View license",
+            command=lambda: webbrowser.open(LICENSE_URL),
+            background="#167d73",
+            foreground="#ffffff",
+            activebackground="#12665e",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="right")
+
+        ttk.Button(details, text="Close", command=about.destroy).pack(anchor="e", pady=(18, 0))
+        about.protocol("WM_DELETE_WINDOW", about.destroy)
 
     def create_tool_bar(self):
         toolbar = ttk.Frame(self.root, padding=(24, 8), relief="raised")
@@ -449,6 +670,7 @@ class VisaAppGUI:
         financial_reports = build_financial_reports(
             grouped_documents,
             progress_callback=self.update_financial_progress,
+            jurisdiction=self.jurisdiction_var.get(),
         )
         self.last_financial_reports = financial_reports
         self.populate_financial_report(financial_reports)
@@ -526,6 +748,15 @@ class VisaAppGUI:
         self.applicant_count.configure(text=str(applicant_group_count))
         self.issue_count.configure(text=str(total_findings))
         self.update_findings_row_height()
+        invitee_folder = Path(self.folder_path) / "invitee"
+        folder_structure_note = ""
+        if not invitee_folder.is_dir():
+            folder_structure_note = (
+                "\n\nINFO: Expected optional folder 'invitee' was not found. "
+                "Invitee/host documents were not scanned. Add an 'invitee' folder "
+                "inside the selected application folder if sponsor or host documents "
+                "are required for this application."
+            )
         self.status_progress.configure(value=100)
         self.status_var.set(
             f"Scan complete - {total_documents} documents, "
@@ -538,6 +769,7 @@ class VisaAppGUI:
             "Scan complete.\n\n"
             + "\n".join(comments)
             + ("\n\nFindings:\n" + finding_summary if finding_summary else "\n\nNo findings.")
+            + folder_structure_note
         )
         self.last_scan_comments = scan_comments
         self.last_scan_findings = all_findings

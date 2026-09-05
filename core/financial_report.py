@@ -26,6 +26,7 @@ class FinancialReport:
 def build_financial_reports(
     grouped_documents: DefaultDict[str, List[ExtractedDocument]],
     progress_callback: Callable[[str, int, int], None] | None = None,
+    jurisdiction: str = "",
 ) -> List[FinancialReport]:
     reports = []
     total_groups = len(grouped_documents)
@@ -79,6 +80,9 @@ def build_financial_reports(
             zero_balance_periods,
             total_deposits,
             total_withdrawals,
+            jurisdiction,
+            periods,
+            currency,
         )
         if not bank_documents:
             warnings.append("No bank statement was found for this applicant.")
@@ -172,16 +176,70 @@ def _build_warnings(
     zero_balance_periods: List[str],
     total_deposits: float | None,
     total_withdrawals: float | None,
+    jurisdiction: str,
+    periods: List[BankStatementPeriod],
+    currency: str,
 ) -> List[str]:
     warnings = []
+    route = jurisdiction.casefold()
+    route_label = jurisdiction or "selected visa route"
     if balance_consistency == "Inconsistent":
-        warnings.append("Opening and closing balances do not consistently carry forward.")
+        warnings.append(
+            f"Potential {route_label} issue: opening and closing balances do not consistently carry forward."
+        )
     if financial_stability in {"Variable", "Unstable"}:
-        warnings.append(f"Financial stability is {financial_stability.casefold()}.")
+        warnings.append(
+            f"Potential {route_label} issue: financial stability is {financial_stability.casefold()}."
+        )
     if any(deposit.is_sudden is True for deposit in deposits):
-        warnings.append("One or more sudden deposits were identified in the last three months.")
+        warnings.append(
+            f"Potential {route_label} issue: one or more sudden deposits need a documented source."
+        )
+    if any(deposit.amount is not None and deposit.amount > 50000 for deposit in deposits):
+        warnings.append(
+            f"Potential {route_label} issue: large credits need supporting evidence and a credible source of funds."
+        )
     if zero_balance_periods:
-        warnings.append("Zero balance occurred in: " + ", ".join(zero_balance_periods) + ".")
+        warnings.append(
+            f"Potential {route_label} issue: zero balance occurred in: "
+            + ", ".join(zero_balance_periods)
+            + "."
+        )
+    if any(
+        balance is not None and balance < 0
+        for period in periods
+        for balance in (period.opening_balance, period.closing_balance)
+    ):
+        warnings.append(
+            f"Potential {route_label} issue: a negative balance was detected."
+        )
     if total_deposits is not None and total_withdrawals is not None and total_withdrawals > total_deposits:
-        warnings.append("Withdrawals exceed deposits across the extracted periods.")
+        warnings.append(
+            f"Potential {route_label} issue: withdrawals exceed deposits across the extracted periods."
+        )
+    if not periods:
+        warnings.append(
+            f"Potential {route_label} issue: no statement periods were extracted, so available funds and account history could not be verified."
+        )
+    elif len(periods) < 3:
+        warnings.append(
+            f"Potential {route_label} issue: only {len(periods)} statement period(s) were extracted; financial history may be insufficient."
+        )
+    if currency == "Not available":
+        warnings.append(
+            f"Potential {route_label} issue: statement currency was not identified, so funds cannot be reliably assessed."
+        )
+
+    if "schengen" in route:
+        warnings.append(
+            "Schengen financial review: verify sufficient means for the full trip, accommodation, and return travel, with funds traceable to the applicant or documented sponsor."
+        )
+    elif "uk" in route:
+        warnings.append(
+            "UK Visit financial review: verify the applicant can cover the visit without unauthorized work or public funds, and that income, savings, and any sponsor support are credible and documented."
+        )
+    elif "canada" in route:
+        warnings.append(
+            "Canada Visitor financial review: verify sufficient funds for the stay and return travel, stable income or savings, and documented sources for significant deposits or third-party support."
+        )
     return warnings

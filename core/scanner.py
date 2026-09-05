@@ -1,6 +1,7 @@
 import os
 import mimetypes
 import time
+from difflib import SequenceMatcher
 from collections import defaultdict
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -39,6 +40,13 @@ MAX_SCAN_WORKERS = min(16, max(1, int(os.getenv("SCAN_WORKERS", "8"))))
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic"}
 EXCLUDED_DIRECTORIES = {"misc", "invitee"}
 GENERATED_REPORT_PREFIX = "visa_verification_report_"
+COMMON_NAME_FORMS = {
+    "alexander": {"alex"}, "benjamin": {"ben", "benny"}, "charles": {"charlie", "chuck"},
+    "daniel": {"dan", "danny"}, "elizabeth": {"liz", "beth", "lizzy"}, "james": {"jim", "jimmy"},
+    "jonathan": {"jon", "johnny"}, "katherine": {"kate", "kathy", "katie"},
+    "margaret": {"maggie", "meg", "peggy"}, "michael": {"mike"}, "robert": {"bob", "rob", "bobby"},
+    "samuel": {"sam", "sammy"}, "thomas": {"tom", "tommy"}, "william": {"will", "bill", "billy"},
+}
 
 
 class ScanCancelledError(Exception):
@@ -64,12 +72,26 @@ def extract_document_data(
         "Extract the passport number when visible, every personal name printed on the document, "
         "and identify passport relationship names such as father, mother, or spouse. "
         "Extract the full address when visible. "
-        "For bank statements, extract the currency and every visible monthly or statement-period summary. "
+        "For cover letters, declarations, invitation letters, itineraries, employment letters, payslips, tax records, "
+        "accommodation evidence, sponsorship evidence, and other supporting documents, identify the document purpose "
+        "and audit every visible statement that could affect a visa decision. Check the applicant name, passport number, "
+        "address, travel dates, intended duration, destination, stated purpose, employment, income, available funds, "
+        "accommodation, sponsor or host identity, relationship, and contact details. Record any missing, contradictory, "
+        "unverifiable, expired, unsigned, undated, or materially different information in anomalies_detected. "
+        "Pay particular attention to contradictions with the passport or with facts stated elsewhere in the document, "
+        "including different dates, amounts, job details, addresses, family relationships, travel purpose, or funding source. "
+        "Flag statements that could suggest an intention to work without permission, remain beyond the visa period, "
+        "lack genuine temporary intent, rely on unexplained third-party funds, or lack credible return ties. "
+        "For every financial document, extract all visible monetary amounts, dates, currencies, account or income periods, "
+        "and financial anomalies; do not limit review to bank statements. For bank statements, extract the currency and every visible monthly or statement-period summary. "
         "For each period, extract opening balance, closing balance, total deposits, total withdrawals, "
-        "and whether the balance reached zero. Also list every visible credit/deposit transaction "
-        "greater than 50000 from the last three months, plus other notable deposits, including date, "
+        "and whether the balance reached zero. List every visible credit/deposit transaction greater than 50000 "
+        "from the last three months and every other notable deposit, including date, "
         "amount, description, and whether the deposit appears sudden or unusual. Do not omit a credit "
         "over 50000 because it is not marked sudden. "
+        "For payslips, employment letters, tax records, investment statements, pension records, or sponsorship evidence, "
+        "record any visible income, regularity, source of funds, missing period, inconsistency, or unexplained amount "
+        "in anomalies_detected. "
         "Use empty arrays or null values when this information is not visible; do not invent values. "
         "Documents in the invitee folder are supporting invitee/host documents, not applicant documents. "
         "The invitee's passport is optional and must not be treated as a missing applicant passport. "
@@ -374,6 +396,8 @@ def _match_passport_holder(
             matches.append((2, holder_key))
         elif document_names.intersection(passport_names):
             matches.append((1, holder_key))
+        elif _similar_name_set_match(document_names, passport_names):
+            matches.append((1, holder_key))
 
     if not matches:
         return None
@@ -386,6 +410,38 @@ def _normalise_value(value: str | None) -> str:
     if not value:
         return ""
     return " ".join(value.casefold().replace("-", " ").split())
+
+
+def _similar_name_set_match(first_names: set[str], second_names: set[str]) -> bool:
+    return any(_similar_names(first_name, second_name) for first_name in first_names for second_name in second_names)
+
+
+def _similar_names(first_name: str, second_name: str) -> bool:
+    first_parts = _normalise_value(first_name).split()
+    second_parts = _normalise_value(second_name).split()
+    if len(first_parts) < 2 or len(first_parts) != len(second_parts):
+        return False
+    return _name_parts_match(first_parts, second_parts) or _name_parts_match(first_parts, list(reversed(second_parts)))
+
+
+def _name_parts_match(first_parts: list[str], second_parts: list[str]) -> bool:
+    for first_part, second_part in zip(first_parts, second_parts):
+        if first_part == second_part:
+            continue
+        if len(first_part) == 1 or len(second_part) == 1:
+            if first_part[0] != second_part[0]:
+                return False
+            continue
+        if first_part.startswith(second_part) or second_part.startswith(first_part):
+            if len(min(first_part, second_part, key=len)) >= 3:
+                continue
+        if second_part in COMMON_NAME_FORMS.get(first_part, set()) or first_part in COMMON_NAME_FORMS.get(second_part, set()):
+            continue
+        if len(first_part) < 4 or len(second_part) < 4 or SequenceMatcher(
+            None, first_part, second_part
+        ).ratio() < 0.86:
+            return False
+    return True
 
 
 def _name_in_filename(name: str, filename: str) -> bool:

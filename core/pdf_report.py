@@ -35,6 +35,7 @@ def generate_pdf_report(
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    findings = list(findings)
     executive_summary = _generate_executive_summary(
         destination,
         scan_comments,
@@ -56,7 +57,11 @@ def generate_pdf_report(
         Paragraph(_safe(scan_comments).replace("\n", "<br/>"), styles["Body"]),
         Spacer(1, 10),
         _section_heading("Verification findings", styles),
-        _findings_table(findings, styles),
+        _section_heading("Errors and critical issues", styles),
+        _findings_table(_findings_by_severity(findings, informational=False), styles),
+        Spacer(1, 8),
+        _section_heading("Informational findings", styles),
+        _findings_table(_findings_by_severity(findings, informational=True), styles),
         Spacer(1, 12),
         _section_heading("Financial statement details", styles),
     ]
@@ -102,7 +107,8 @@ def _generate_executive_summary(
         "Create a concise professional executive summary for a visa document verification report. "
         "Use only the supplied facts. Do not invent documents, amounts, names, conclusions, or legal advice. "
         "Mention the number and seriousness of verification findings, missing bank statements, and any credits "
-        "over 50,000. Use plain text with 2 or 3 short paragraphs.\n\n"
+        "over 50,000. Use plain text with exactly three short sections titled SUMMARY, KEY RISKS, and EVIDENCE GAPS. "
+        "Use one clear point per line and keep each section concise.\n\n"
         f"Visa route: {destination}\n"
         f"Scan comments:\n{scan_comments}\n\n"
         f"Verification findings:\n{finding_lines or 'None'}\n\n"
@@ -145,12 +151,21 @@ def _financial_section(report: FinancialReport, styles):
         ["Net savings", _money(report.net_savings, report.currency)],
         ["Savings rate", "Not available" if report.savings_rate is None else f"{report.savings_rate:.1f}%"],
         ["Zero-balance periods", ", ".join(report.zero_balance_periods) or "None identified"],
-        ["Credits over 50,000", "\n".join(_deposit_text(deposit, report.currency) for deposit in report.large_credit_deposits) or "None identified"],
-        ["Sudden deposits", "\n".join(_deposit_text(deposit, report.currency) for deposit in report.sudden_deposits) or "None identified"],
-        ["Warnings", "\n".join(report.warnings) or "None"],
+        ["Credits over 50,000", _credit_lines(report)],
+        ["Sudden deposits", _sudden_deposit_lines(report)],
+        ["Financial risks and evidence gaps", _warning_lines(report)],
     ]
     table = Table(
-        [[Paragraph(_safe(label), styles["TableLabel"]), Paragraph(_safe(value), styles["TableCell"])] for label, value in rows],
+        [
+            [
+                Paragraph(_safe(label), styles["TableLabel"]),
+                Paragraph(
+                    value if label in {"Credits over 50,000", "Sudden deposits", "Financial risks and evidence gaps"} else _safe(value),
+                    styles["TableCell"],
+                ),
+            ]
+            for label, value in rows
+        ],
         colWidths=[48 * mm, 128 * mm],
         repeatRows=0,
     )
@@ -191,6 +206,19 @@ def _findings_table(findings: Iterable[tuple[str, str]], styles):
     return table
 
 
+def _findings_by_severity(
+    findings: Iterable[tuple[str, str]],
+    informational: bool,
+) -> list[tuple[str, str]]:
+    selected = []
+    for applicant, finding in findings:
+        finding_text = str(finding).casefold().lstrip("• ").strip()
+        is_info = finding_text.startswith("info")
+        if is_info == informational:
+            selected.append((applicant, finding))
+    return selected
+
+
 def _build_styles():
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle("ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=colors.HexColor("#17324D"), alignment=TA_CENTER, spaceAfter=4))
@@ -224,6 +252,30 @@ def _deposit_text(deposit, currency: str) -> str:
     amount = _money(deposit.amount, currency)
     description = f" ({deposit.description})" if deposit.description else ""
     return f"{date}: {amount}{description}"
+
+
+def _credit_lines(report: FinancialReport) -> str:
+    if not report.large_credit_deposits:
+        return "None identified"
+    return "<br/>".join(
+        f"- {_safe(_deposit_text(deposit, report.currency))}"
+        for deposit in report.large_credit_deposits
+    )
+
+
+def _sudden_deposit_lines(report: FinancialReport) -> str:
+    if not report.sudden_deposits:
+        return "None identified"
+    return "<br/>".join(
+        f"- {_safe(_deposit_text(deposit, report.currency))}"
+        for deposit in report.sudden_deposits
+    )
+
+
+def _warning_lines(report: FinancialReport) -> str:
+    if not report.warnings:
+        return "None identified"
+    return "<br/>".join(f"- {_safe(warning)}" for warning in report.warnings)
 
 
 def _money(value, currency: str) -> str:
